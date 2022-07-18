@@ -20,7 +20,7 @@ remote_theme: mmistakes/so-simple-theme
 locale: en-US
 title: "casiphia.github.io"
 description: "A simple Jekyll theme for words and pictures."
-baseurl: "/so-simple-theme"
+baseurl: "/"
 url: "https://casiphia.github.io"
 logo: "/images/so-simple-site-logo.png"
 date_format: "%B %-d, %Y"

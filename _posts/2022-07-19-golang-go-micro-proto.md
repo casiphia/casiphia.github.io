@@ -4,7 +4,7 @@ categories:
   - Golang
 tags:
   - go-micro
-last_modified_at: 2022-07-19T14:28:50-05:00
+last_modified_at: 2022-07-19T17:28:50-05:00
 ---
 
 目前开发的产品架构采用微服务架构，微服务之间通信的消息格式则使用的proto3标准协议格式。

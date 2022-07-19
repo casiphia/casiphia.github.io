@@ -5,7 +5,7 @@ categories:
 tags:
   - go-micro
   - etcd
-last_modified_at: 2022-07-19T14:28:50-05:00
+last_modified_at: 2022-07-19T16:28:50-05:00
 ---
 
 这一篇就来讲讲，go-micro v2 如何进行配置etcd注册中心和操作配置中心

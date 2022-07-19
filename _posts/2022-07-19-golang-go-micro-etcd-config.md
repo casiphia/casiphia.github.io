@@ -4,7 +4,7 @@ categories:
   - Golang
 tags:
   - go-micro
-last_modified_at: 2022-07-19T14:28:50-05:00
+last_modified_at: 2022-07-19T15:28:50-05:00
 ---
 
 不管是单个服务还是微服务，读取文件在每个项目系统中是必不可少的部分。

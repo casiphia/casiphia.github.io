@@ -101,8 +101,8 @@ defaults:
       share: true
   # Recipe defaults
   - scope:
-      path: "_recipes"
-      type: recipes
+      path: "_about"
+      type: about
     values:
       layout: post
       comments: true

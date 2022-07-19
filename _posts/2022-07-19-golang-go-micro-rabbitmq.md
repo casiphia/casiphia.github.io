@@ -1,357 +1,297 @@
 ---
-title: "proto3默认值与可选项"
+title: "go-micro集成RabbitMQ实战和原理"
 categories:
   - Golang
 tags:
   - go-micro
+  - rabbitmq
 last_modified_at: 2022-07-19T14:28:50-05:00
 ---
 
-目前开发的产品架构采用微服务架构，微服务之间通信的消息格式则使用的proto3标准协议格式。
+在go-micro中异步消息的收发是通过Broker这个组件来完成的，底层实现有RabbitMQ、Kafka、Redis等等很多种方式，这篇文章主要介绍go-micro使用RabbitMQ收发数据的方法和原理。
 
-### proto介绍
+## Broker的核心功能
 
-全称Protocol Buffers(下面简称PB)是Google公司开发的一种数据描述语言，是一种类似XML但更灵活和高效的结构化数据存储格式，可用于结构化数据的序列化，适用于数据存储、RPC数据交换格式。它可用于通讯协议、数据存储等领域的语言无关、平台无关、可扩展的序列化结构数据格式。它支持多种语言，比如C++，Java，C#，Python，JavaScript等等。目前它的最新版本是3.18.0。
-
-### proto优点
-
-从上面的proto介绍不难得出其具备下面几个优点：
-
-1. 描述简单，对开发人员友好
-2. 跨平台、跨语言，不依赖于具体运行平台和编程语言
-3. 高效自动化解析和生成
-4. 压缩比例高
-5. 可扩展、兼容性好
-
-### proto3特性
-
-proto3相较于proto2支持更多语言但在语法上更为简洁。去除了一些复杂的语法和特性，更强调约定而弱化语法。
-
-1. 删除原始值字段的presence字段逻辑，删除required字段以及删除默认值。这使得proto3更容易实现如在Android Java，Objective C或Go等语言中的开放式结构化表示。
-2. 移除unknown关键字.
-3. 去掉extensions类型，使用Any新标准类型替换。
-4. 针对未知枚举值的固定语法.
-5. 增加maps(主要指代码生成支持map)
-6. 添加一组用于表示时间，动态数据等的标准类型。
-7. 替换二进制编码的明确JSON编码
-
-## 问题提出
-
-不可否认由于proto3在语法上进行了大量简化，使得proto格式无论是在友好性上、还是灵活性上都有了大幅提升。但是由于删除了presence、required及默认值这些内容，导致proto结构中的所有字段都成了optional（可选字段）类型。这在实际使用过程出现了如下问题：
-
-1. 结构化数据缺失、显示不全，默认值都当成了不存在（not present)。对外提供的数据上报时，不便于对数据的分析和使用。对内服务调试时，不便于问题跟踪和定位;
-2. 无法验证业务逻辑上数据构造的正确性，如果是默认值不清楚数据构造时到底是否赋过值。
-
-## 问题描述
-
-openAPI调用RPC微服务的接口返回字段应该与接口文档一致
-
-#### 正确返回
-
-```json
-{
-  "code": 200,
-  "cnMsg": "操作成功",
-  "enMsg": "Success",
-  "data": {
-    "nonce": "",
-    "isBind": false
-  }
-}
-```
-
-> 接口文档
-
-#### 错误返回
-
-```json
-{
-  "code": 200,
-  "cnMsg": "操作成功",
-  "enMsg": "Success",
-  "data": {}
-}
-```
-
-> Openapi
-
-api文档需要返回`nonce`和`isBind`字段，但是openApi返回缺少这两个字段
-
-### 问题追踪
-
-通过手动调用Grpc测试发现，grpc接口返回的空值时忽略了此字段
-
-```json
-{
-  "code": 200,
-  "cnMsg": "操作成功",
-  "enMsg": "Success",
-  "data": {}
-}
-```
-
-> Grpc接口调用
-
-## 问题解决
-
-### 1.wrappers方案
-
-#### 方案介绍
-
-经过研究发现google已经意识到这个问题，采取了一些补救方法—提供wrappers包。该包位于github.com/golang/protobuf/ptypes/wrappers/wrappers.proto，proto文件中包含以下消息类型：
-
-1. DoubleValue
-2. FloatValue
-3. Int64Value
-4. UInt64Value
-5. Int32Value
-6. UInt32Value
-7. BoolValue
-8. StringValue
-9. BytesValue
-
-以Int32Value为例，其包装方法如下：
-
-```protobuf
-// 登陆响应
-message RspLogin {
-	string nonce = 1; //随机值
-	bool isBind = 2; //是否绑定邮箱:true绑定,false未绑定
-}
-```
-
-#### 示例
-
-```protobuf
-import "google/protobuf/wrappers.proto";
-
-message Test {
-  google.protobuf.StringValue nonce = 1;
-  google.protobuf.BoolValue nonce = 2;
-}
-```
-
-#### Handler处理
+Broker的核心功能是Publish和Subscribe，也就是发布和订阅。它们的定义是：
 
 ```go
-import "google.golang.org/protobuf/types/known/wrapperspb"
-
-rsp.Data.IsBind = wrapperpb.Bool(false)
-rsp.Data.Nonce = wrapperpb.String("")
+Publish(topic string, m *Message, opts ...PublishOption) error
+Subscribe(topic string, h Handler, opts ...SubscribeOption) (Subscriber, error)
 ```
 
-#### 优缺点：
+### 发布
 
-**优点：** 描述简洁清晰
+发布第一个参数是topic（主题），用于标识某类消息。
 
-**缺点：** 使用该方案会使结构变大，每在一个字段使用都会增加2个字节。需要修改左右handler方法，openapi的swag不能识别`FloatValue`类型
+发布的数据是通过Message承载的，其包括消息头和消息体，定义如下：
 
-### 2.oneof方案
-
-#### 方案介绍
-
-另外还可以使用oneof来达到目的，oneof与数据结构联合体（UNION）有点类似，一次最多只有一个字段有效，一般是为了节省存储空间。针对本文所遇到的问题则是将需要处理的字段通过oneof进行包装。
-
-#### 示例
-
-```protobuf
-// 登陆响应
-message RspLogin {
-  oneof a_oneof {
-		string nonce = 1; //随机值
-		bool isBind = 2; //是否绑定邮箱:true绑定,false未绑定
-	}
+```go
+type Message struct {
+    Header map[string]string
+    Body   []byte
 }
 ```
 
-可以使用test.getAOneofCase()来检查a是否被设置。
+消息头是map，也就是一组KV（键值对）。
 
-#### 优缺点
+消息体是字节数组，在发送和接收时需要开发者进行编码和解码的处理。
 
-**优点：** 向后兼容proto2 
+### 订阅
 
-**缺点：** 不能使用在repeated类型字段,需要改动handler方法
+订阅的第一个参数也是topic（主题），用于过滤出要接收的消息。
 
-### 3.自定义nullable方案
+订阅的数据是通过Handler处理的，Handler是一个函数，其定义如下：
 
-#### 方案介绍
+```go
+type Handler func(Event) error
+```
 
-该方案主要通过实现一个自定义的nullable关键字来解决字段是否能够为空的问题。 修改详细可参考： https://github.com/criteo-forks/protobuf/commit/8298aff178ccffd0c7c99806e714d0f14f40faf8
+其中的参数Event是一个接口，需要具体的Broker来实现，其定义如下：
 
-#### 示例
-
-```protobuf
-// 登陆响应
-message RspLogin {
-		nullable nonce = 1; //随机值
-		nullable isBind = 2; //是否绑定邮箱:true绑定,false未绑定
+```go
+type Event interface {
+    Topic() string
+    Message() *Message
+    Ack() error
+    Error() error
 }
 ```
 
-#### 优缺点
+* Topic() 用于获取当前消息的topic，也是发布者发送时的topic。
+* Message() 用于获取消息体，也是发布者发送时的Message，其中包括Header和Body。
+* Ack() 用于通知Broker消息已经收到了，Broker可以删除消息了，可用来保证消息至少被消费一次。
+* Error() 用于获取Broker处理消息过成功的错误。
 
-**优点：** 描述简洁清晰 **缺点：**
+开发者订阅数据时，需要实现Handler这个函数，接收Event的实例，提取数据进行处理，根据不同的Broker，可能还需要调用Ack()，处理出现错误时，返回error。
 
-1. 自定义的关键字不利于版本升级更新
-2. 需要修改源代码
-3. 与proto3版本的本意冲突（使得proto语义复杂化）
+## go-micro集成RabbitMQ实战
 
-### 4.map方案
+大概了解了Broker的定义之后，再来看下如何使用go-micro收发RabbitMQ消息。
 
-#### 方案介绍
+### 启动一个RabbitMQ
 
-还有人通过map<int32,bool>来解决问题，每当一个字段被设置时，bool值则被设置为true（默认值也是）。另外如果设置的不是默认值时，还需要在每个字段的setter方法中增加hasXXX方法。详情参见：https://github.com/google/protobuf/issues/2684
+如果你已经有一个RabbitMQ服务器，请跳过这个步骤。
 
-#### 示例
+这里介绍一个使用docker快速启动RabbitMQ的方法，当然前提是你得安装了docker。
+
+执行如下命令启动一个rabbitmq的docker容器：
+
+```shell
+docker run --name rabbitmq1 -p 5672:5672 -p 15672:15672 -d rabbitmq
+```
+
+然后进入容器进行一些设置：
+
+```bash
+docker exec -it rabbitmq1 /bin/bash
+```
+
+启动管理工具、禁用指标采集（会导致某些API500错误）：
+
+```shell
+rabbitmq-plugins enable rabbitmq_management
+ 
+cd /etc/rabbitmq/conf.d/
+echo management_agent.disable_metrics_collector = false > management_agent.disable_metrics_collector.conf
+```
+
+最后重启容器：
 
 ```
-message Test {
-  map<string, string> data = 1;
+docker restart rabbitmq1
+```
+
+最后浏览器中输入 [http://127.0.0.0:15672](https://link.segmentfault.com/?enc=YbppcfueE52KfuRhfxXgrw%3D%3D.l6hmrSz3Kr9cBQc0iwULwXHE%2BRaVcm33jEVT4YehYGI%3D) 即可访问，默认用户名和密码都是 guest 。
+
+### 编写收发函数
+
+为了方便演示，先来定义发布消息和接收消息的函数。其中发布函数使用了go-micro提供的Event类型，还有其它类型也可以提供Publish的功能，这里发送的数据格式是Json字符串。接收消息的函数名称可以随意取，但是参数和返回值必须符合规范，也就是下边代码中的样子，这个函数也可以是绑定到某个类型的。
+
+```go
+// 定义一个发布消息的函数：每隔1秒发布一条消息
+func loopPublish(event micro.Event) {
+    for {
+        time.Sleep(time.Duration(1) * time.Second)
+
+        curUnix := strconv.FormatInt(time.Now().Unix(), 10)
+        msg := "{\"Id\":" + curUnix + ",\"Name\":\"张三\"}"
+        event.Publish(context.TODO(), msg)
+    }
+}
+
+// 定义一个接收消息的函数：将收到的消息打印出来
+func handle(ctx context.Context, msg interface{}) (err error) {
+    defer func() {
+        if r := recover(); r != nil {
+            err = errors.New(fmt.Sprint(r))
+            log.Println(err)
+        }
+    }()
+
+    b, err := json.Marshal(msg)
+    if err != nil {
+        log.Println(err)
+        return
+    }
+
+    log.Println(string(b))
+    return
 }
 ```
 
-#### 优缺点
+### 编写主体代码
 
-**优点：**
-
-1. 结构的增大会比wrapper方案小得多
-
-2. 向后兼容proto2
-
-**缺点：**
-
-1. 写法不够简介
-
-2. map的key值只能是整形和字符串
-
-3. 需要修改setter的实现
-
-4. 对外提供接口不明确
-
-### 5.jsonpb方案
-
-#### 方案介绍
-
-使用`jsonpb`讲pb消息序列化成byte提供外部使用
-
-##### 示例：
+这里先给出代码，里面提供了一些注释，后边还会有详细介绍。
 
 ```go
-import "github.com/gogo/protobuf/jsonpb"
-...
-m := jsonpb.Marshaler{EmitDefaults: true}
-var buf bytes.Buffer
-m.Marshal(&buf, rsp.Data)
+func main() {
+    // RabbitMQ的连接参数
+    rabbitmqUrl := "amqp://guest:guest@127.0.0.1:5672/"
+    exchangeName := "amq.topic"
+    subcribeTopic := "test"
+    queueName := "rabbitmqdemo_test"
+
+    // 默认是application/protobuf，这里演示用的是Json，所以要改下
+    server.DefaultContentType = "application/json"
+
+    // 创建 RabbitMQ Broker
+    b := rabbitmq.NewBroker(
+        broker.Addrs(rabbitmqUrl),           // RabbitMQ访问地址，含VHost
+        rabbitmq.ExchangeName(exchangeName), // 交换机的名称
+        rabbitmq.DurableExchange(),          // 消息在Exchange中时会进行持久化处理
+        rabbitmq.PrefetchCount(1),           // 同时消费的最大消息数量
+    )
+
+    // 创建Service，内部会初始化一些东西，必须在NewSubscribeOptions前边
+    service := micro.NewService(
+        micro.Broker(b),
+    )
+    service.Init()
+
+    // 初始化订阅上下文：这里不是必需的，订阅会有默认值
+    subOpts := broker.NewSubscribeOptions(
+        rabbitmq.DurableQueue(),   // 队列持久化，消费者断开连接后，消息仍然保存到队列中
+        rabbitmq.RequeueOnError(), // 消息处理函数返回error时，消息再次入队列
+        rabbitmq.AckOnSuccess(),   // 消息处理函数没有error返回时，go-micro发送Ack给RabbitMQ
+    )
+
+    // 注册订阅
+    micro.RegisterSubscriber(
+        subcribeTopic,    // 订阅的Topic
+        service.Server(), // 注册到的rpcServer
+        handle,           // 消息处理函数
+        server.SubscriberContext(subOpts.Context), // 订阅上下文，也可以使用默认的
+        server.SubscriberQueue(queueName),         // 队列名称
+    )
+
+    // 发布事件消息
+    event := micro.NewEvent(subcribeTopic, service.Client())
+    go loopPublish(event)
+
+    log.Println("Service is running ...")
+    if err := service.Run(); err != nil {
+        log.Println(err)
+    }
+}
 ```
 
-返回
+主要逻辑是：
 
-```
-data:{\"nonce\": \"\",\"isBind\": false}
-```
+1、先创建一个RabbitMQ Broker，它实现了标准的Broker接口。其中主要的参数是RabbitMQ的访问地址和RabbitMQ交换机，PrefetchCount是订阅者（或称为消费者）使用的。
 
-#### 优缺点
+2、然后通过 NewService 创建go-micro服务，并将broker设置进去。这里边会初始化很多东西，最核心的是创建一个rpcServer，并将rpcServer和这个broker绑定起来。
 
-**优点：**
+3、然后是通过 RegisterSubscriber 注册订阅，这个注册有两个层面的功能：一是如果RabbitMQ上还不存在这个队列时创建队列，并订阅指定topic的消息；二是定义go-micro程序从这个RabbitMQ队列接收数据的处理方式。
 
-1. 统一消息返回string
-
-**缺点：**
-
-1. 返回[]byte不够友好
-2. openapi序列化后不能解决问题
-3. 前端需要序列化数据
-4. 不能根本解决问题
-
-### 6.手动修改proto
-
-#### 方案介绍
-
-问题的根源在与struct的tag中json为`omitempty`,导致json序列化的时候字段为空则忽略字段
-
-##### 示例：
-
-```protobuf
-Nonce                string   `protobuf:"bytes,1,opt,name=nonce,proto3" json:"nonce, omitempty"`
-IsBind               bool     `protobuf:"varint,2,opt,name=isBind,proto3" json:"isBind, omitempty"`
-```
-
-手动删除json中的`omitempty`字段
-
-#### 优缺点
-
-**优点：**
-
-1. 改动小，仅需要改动proto文件
-
-**缺点：**
-
-1. 兼容性差
-2. 不灵活，每次对proto改动都需要手动修改
-
-### 7.手动修改json包
-
-#### 方案介绍
-
-最后使用的方法是复制了 `encoding/json` 库的源码到新的库 `my_json`，修改[这一行](https://github.com/golang/go/blob/release-branch.go1.9/src/encoding/json/encode.go#L1156)中的 `omitEmpty` 为 `false`。当需要忽略 `omitempty`时，使用 `my_json` 库即可
-
-##### 示例：
+这里详细看下订阅的参数：
 
 ```go
-fields = append(fields, fillField(field{
-    name:      name,
-    tag:       tagged,
-    index:     index,
-    typ:       ft,
-    omitEmpty: opts.Contains("omitempty"), // 改为 false
-    quoted:    quoted,
-}))
+func RegisterSubscriber(topic string, s server.Server, h interface{}, opts ...server.SubscriberOption) error
 ```
 
-#### 优缺点
+* topic：go-micro使用的是Topic模式，发布者发送消息的时候要指定一个topic，订阅者根据需要只接收某个或某几个topic的消息；
+* s：消息从RabbitMQ接收后会进入这个Server进行处理，它是NewService的时候内部创建的；
+* h：使用了上一步创建的接收消息的函数 handle，Server中的方法会调用这个函数；
+* opts 是订阅的一些选项，这里需要指定RabbitMQ队列的名称；另外SubscriberContext定义了订阅的一些行为，这里DurableQueue设置RabbitMQ订阅消息的持久化方式，一般我们都希望消息不丢失，这个设置的作用是即使程序与RabbitMQ的连接断开，消息也会保存在RabbitMQ队列中；AckOnSuccess和RequeueOnError定义了程序处理消息出现错误时的行为，如果handle返回error，消息会重新返回RabbitMQ，然后再投递给程序。
 
-**优点：**
+4、然后这里为了演示，通过NewEvent创建了一个Event，通过它每隔一秒发送1条消息。
 
-1. 兼容性好
+5、最后通过service.Run()把这个程序启动起来。
 
-**缺点：**
+注意一般发布者和订阅者是在不同的程序中，这里只是为了方便演示，才把他们放在一个程序中。所以如果只是发布消息，就不需要订阅的代码，如果只是订阅，也不需要发布消息的代码，大家使用的时候根据需要自己裁剪吧。
 
-1. 不灵活
-2. 对现有项目改动最大
+## go-micro集成RabbitMQ的处理流程
 
-### 8.手动修改protoc-gen-go
+这个部分来看一下消息在go-micro和RabbitMQ中是怎么流转的，我画了一个示意图：
 
-#### 方案介绍
+这个图有点复杂，这里详细讲解下。
 
-既然根源在于json的tag标签，那么从proto生成方法入手，追踪protoc-gen-go代码发现如下
+首先分成三块：RabbitMQ、消息发布部分、消息接收部分，这里用不同的颜色进行了区分。
 
-##### 示例：
+* RabbitMQ不是本文的重点，就把它看成一个整体就行了。
+* 消息发布部分：从生产者程序调用Event.Publish开始，然后调用Client.Publish，到这里为止，都是在go-micro的核心模块中进行处理；然后再调用Broker.Publish，这里的Broker是RabbitMQ插件的Broker实例，从这里开始进入了RabbiitMQ插件部分，然后再依次通过RabbitMQ Connection的Publish方法、RabbitMQ Channle的Publish方法，最终发送到RabbitMQ中。
+* 消息接收部分：Service.Run内部会调用rpcServer.Start，这个方法内部会调用Broker.Subscribe，这个方法是RabbitMQ插件中定义的，它会读取RegisterSubscriber时的一些RabbitMQ队列设置，然后再依次传递到RabbitMQ Connection的Consume方法、RabbitMQ Channel的ConsumeQueue方法，最终连接到RabbitMQ，并在RabbitMQ上设置好要订阅的队列；这些方法还会返回一个类型为amqp.Delivery的Go Channel，Broker.Subscribe不断的从这个Go Channel中读取数据，然后再发送到调用Broker.Subscribe时传入的一个消息处理方法中，这里就是rpcServer.HandleEvnet，消息经过一些处理后再进入rpcServer内部的路由处理模块，这里就是route.ProcessMessage，这个方法内部会根据当前消息的topic查找RegisterSubscriber时注册的订阅，并最终调用到当时注册的用于接收消息的函数。
+
+这个处理过程还可以划分为业务部分、核心模块部分和插件部分。
+
+* 首先创建一个插件的Broker实现，把它注册到核心模块的rpcServer中；
+* 消息的发送从业务部分进入核心模块部分，再进入具体实现Broker的插件部分；
+* 消息的接收则首先进入插件部分，然后再流转到核心模块部分，再流转到业务部分。
+
+从上边的图中可以看到消息都需要经过这个RabbitMQ插件进行处理，实际上可以只使用这个插件，就能实现消息的发送和接收。这个演示代码我已经提交到了Github，有兴趣的同学可以在文末获取Github仓库的地址。
+
+从上边这些划分中，我们可以理解到设计者的整体设计思路，把握关键节点，用好用对，出现问题时可以快速定位。
+
+## 填的几个坑
+
+### 不能接收其它框架发布的消息
+
+这个是因为route.ProcessMessage查找订阅时使用了go-micro专用的一个头信息：
 
 ```go
-//tag := fmt.Sprintf("protobuf:%s json:%q", g.goTag(message, field, wiretype), jsonName+",omitempty")
-tag := fmt.Sprintf("protobuf:%s json:%q", g.goTag(message, field, wiretype), jsonName)
+// get the subscribers by topic
+    subs, ok := router.subscribers[msg.Topic()]
 ```
 
-注释生成``omitempty`标签代码,使用`go install`重新安装工具
+这个msg.Topic返回的是如下实例中的topic字段：
 
-#### 优缺点
+```go
+rpcMsg := &rpcMessage{
+        topic:       msg.Header["Micro-Topic"],
+        contentType: ct,
+        payload:     &raw.Frame{Data: msg.Body},
+        codec:       cf,
+        header:      msg.Header,
+        body:        msg.Body,
+    }
+```
 
-**优点：**
+其它框架不会有这么一个头信息，除非专门适配go-micro。
 
-1. 对现有项目不需要任何改动
-2. grpc接口之间相互调用忽略空字段
-3. openapi接口对前端显式提供字段为空
+因为使用RabbitMQ的场景下，整个开发都是围绕RabbitMQ做的，而且go-micro的处理逻辑没有考虑RabbitMQ订阅可以使用通配符的情况，发布消息的Topic、接收消息的Topic与Micro-Topic的值匹配时都是按照是否相等的原则处理的，因此可以用RabbitMQ消息自带的topic来设置这个消息头。rabbitmq.rbroker.Subscribe 中接收到消息后，就可以进行这个设置：
 
-**缺点：**
+```go
+// Messages sent from other frameworks to rabbitmq do not have this header.
+        // The 'RoutingKey' in the message can be used as this header.
+        // Then the message can be transfered to the subscriber which bind this topic.
+        msgTopic := header["Micro-Topic"]
+        if msgTopic == "" {
+            header["Micro-Topic"] = msg.RoutingKey
+        }
+```
 
-1. 不灵活，对煸一会环境依赖大
+这样go-micro开发的消费者程序就能接收其它框架发布的消息了，其它框架无需适配。
 
-## 总结
+### RabbitMQ重启后订阅者和发布者无限阻塞
 
-结合各种因素，最终采用手动修改`protoc-gen-go`工具。
+go-micro的RabbitMQ插件底层使用另一个库：github.com/streadway/amqp
 
-## 参考文献：
+对于发布者，RabbitMQ断开连接时amqp库会通过Go Channel同步通知go-micro，然后go-micro可以发起重新连接。问题出现在这个同步通知上，go-micro的RabbitMQ插件设置了接收连接和通道的关闭通知，但是只处理了一个通知就去重新连接了，这就导致有一个Go Channel一直阻塞，而这个阻塞会导致某个锁不能释放，这个锁又是Publish时候需要的，因此导致发布者无限阻塞。解决办法就是外层增加一个循环，等所有的通知都收到了，再去做重新连接。
 
-1. https://github.com/google/protobuf/issues/1606
-2. https://groups.google.com/forum/#!topic/protobuf/6eJKPXXoJ88
+对于订阅者，RabbitMQ断开连接时，它会一直阻塞在某个Go Channel上，直到它返回一个值，这个值代表连接已经重新建立，订阅者可以重建消费通道。问题也是出现在这个阻塞的Go Channel上，因为这个Go Channel在每次收到amqp的关闭通知时会重新赋值，而订阅者等待的Go Channel可能是之前的旧值，永远也不会返回，订阅者也就无限阻塞了。解决办法呢，就是在select时增加一个time.After，让等待的Go Channel有机会更新到新值。
 
+代码就不贴了，有兴趣的可以到Github中去看： [https://github.com/go-micro/p...](https://link.segmentfault.com/?enc=RovcBYCl5n7k7ykY%2FpQoQg%3D%3D.58SRpVG8aGtQPOo4ydia7kAe9Qho4IsuWKdKjNITSOuec%2F3taeI9szHSzkgWyevbJ6Ized5wvCfRH8gVxLW7tJJ9KUDLDZLpARWj2%2FCTWAX5ZUUMNLc8Rh6XUe7YLyyE)
+
+关于这两个问题的修改已经合并到官方仓库中，大家去get最新的代码就可以了。
+
+这两个坑填了，基本上就能满足我的需要了。当然可能还有其它的坑，比如go-micro的RabbitMQ插件好像没有发布者确认的功能，这个要实现，还得好好想想怎么改。

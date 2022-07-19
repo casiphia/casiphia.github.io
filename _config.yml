@@ -19,7 +19,7 @@ remote_theme: mmistakes/so-simple-theme
 
 #locale: en-US
 locale: zh-CN
-title: "wxd"
+title: "casiphia"
 description: "There is no end to learning."
 baseurl: "/"
 url: "https://casiphia.github.io"

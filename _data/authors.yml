@@ -1,15 +1,13 @@
 # Authors
 
-Billy Rick:
-  name: Billy Rick
-  picture: /images/bio-photo-2.jpg
-  twitter: "@billyrick"
+Casiphia:
+  name: casiphia
+  picture: /images/logo.png
   links:
-    - title: Twitter
-      url: https://twitter.com/billyrick
-      icon: fab fa-twitter-square
+    - title: GitHub
+      url: https://github.com/casiphia
+      icon: fab fa-github-square
 
 Cornelius Fiddlebone:
   name: Cornelius Fiddlebone
   picture: /images/bio-photo.jpg
-  twitter: corneliusfiddlebone

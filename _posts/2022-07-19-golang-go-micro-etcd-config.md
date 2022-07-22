@@ -4,6 +4,7 @@ categories:
   - Golang
 tags:
   - go-micro
+  - etcd
 last_modified_at: 2022-07-19T15:28:50-05:00
 ---
 

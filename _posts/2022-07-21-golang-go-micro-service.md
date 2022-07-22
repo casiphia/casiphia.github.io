@@ -4,7 +4,6 @@ categories:
   - Golang
 tags:
   - go-micro
-  - rabbitmq
 last_modified_at: 2022-07-21T16:10:50-05:00
 ---
 
